@@ -155,7 +155,8 @@ git clone https://github.com/MindedCoder/claw-monitor_v2.git ~/.bfe/claw-monitor
   "sub2apiUsage": {
     "enabled": false,
     "monitorBaseUrl": "https://monitor.example.com",
-    "customerEmail": "",
+    "username": "",
+    "apiToken": "",
     "intervalMs": 30000,
     "cacheTtlMs": 30000
   },
@@ -182,6 +183,8 @@ git clone https://github.com/MindedCoder/claw-monitor_v2.git ~/.bfe/claw-monitor
   }
 }
 ```
+
+`sub2apiUsage.username` 固定绑定本机下游用户，`apiToken` 使用中心监控只读 Token。浏览器只访问本机 `/api/sub2api-usage`，不能传入或切换其他用户名；本机服务端负责缓存并调用中心统一 5H/7D 接口。
 
 修改配置后重新运行 `bash install.sh` 生效。
 

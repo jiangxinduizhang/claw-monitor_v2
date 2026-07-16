@@ -6,105 +6,77 @@ function cleanBaseUrl(value) {
   return String(value || '').replace(/\/+$/, '');
 }
 
-function isBlank(value) {
-  return value === undefined || value === null || String(value).trim() === '';
-}
-
 function text(value, fallback = '-') {
-  if (isBlank(value)) return fallback;
+  if (value === undefined || value === null || String(value).trim() === '') return fallback;
   return String(value);
 }
 
-function percentClass(raw, state) {
-  const normalized = String(state || '').toLowerCase();
-  const value = Number(raw);
-  if (normalized === 'critical' || value >= 90) return 'critical';
-  if (normalized === 'warning' || normalized === 'warn' || value >= 75) return 'warn';
+function statusClass(status) {
+  const value = String(status || '').toLowerCase();
+  if (['limited', 'critical', 'configuration_conflict', 'dedicated_binding_error'].includes(value)) return 'fail';
+  if (['warning', 'unavailable'].includes(value)) return 'warn';
   return 'ok';
 }
 
-function stateClass(state) {
-  const normalized = String(state || '').toLowerCase();
-  if (normalized === 'critical') return 'critical';
-  if (normalized === 'warning' || normalized === 'warn') return 'warn';
-  return 'ok';
+function statusLabel(status) {
+  return {
+    normal: '正常',
+    warning: '接近限额',
+    critical: '即将限额',
+    limited: '已达限额',
+    unlimited: '不限额',
+    unavailable: '暂不可用',
+  }[status] || text(status, '未知');
 }
 
-function statusClass(account) {
-  if (account.available) return 'ok';
-  if (account.runtime_status === 'rate_limited') return 'warn';
-  return 'fail';
+function modeLabel(mode) {
+  return {
+    shared_pool: '共享池',
+    dedicated_upstream: '独立上游',
+  }[mode] || text(mode, '配置异常');
 }
 
-function statusLabel(account) {
-  const managed = {
-    monitored: '监控中',
-    pending: '待处理',
-    ignored: '已忽略',
-  }[account.managed_status] || text(account.managed_status, '未纳管');
-  const runtime = text(account.runtime_label || account.runtime_status, '-');
-  return `${managed} / ${runtime}`;
-}
-
-function accountKey(account, index) {
-  return [
-    account.target_id,
-    account.account_id,
-    account.account,
-    account.group,
-    index,
-  ].filter(Boolean).join(':');
-}
-
-function usageCell(label, raw, display, resetAt, state) {
-  const shown = text(display);
-  if (shown === '-') return '<span class="sub2api-muted">-</span>';
-  const cls = percentClass(raw, state);
-  const prefix = label ? `${label} ` : '';
-  return `
-    <div class="sub2api-usage-cell ${cls}">
-      <span>${esc(prefix)}${esc(shown)}</span>
-      <small>${esc(text(resetAt))}</small>
-    </div>`;
-}
-
-function dateCell(display, state) {
-  const shown = text(display);
-  if (shown === '-') return '<span class="sub2api-muted">-</span>';
-  return `<span class="sub2api-date ${stateClass(state)}">${esc(shown)}</span>`;
-}
-
-function normalizePayload(data) {
-  const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
+export function normalizePayload(data) {
   return {
     ok: data?.ok === true,
-    customer: data?.customer || {},
-    summary: data?.summary || {},
-    accounts,
-    bindings: Array.isArray(data?.bindings) ? data.bindings : [],
-    discoveryErrors: Array.isArray(data?.discovery_errors) ? data.discovery_errors : [],
+    username: text(data?.username, ''),
+    usageMode: text(data?.usage_mode, ''),
+    overallStatus: text(data?.overall_status, ''),
+    source: data?.source || {},
+    windows: data?.windows || {},
     updatedAt: data?.updated_at || null,
     cache: data?.cache || {},
   };
+}
+
+export function windowDisplay(window, usageMode) {
+  if (!window) return { value: '-', detail: '暂无数据', status: 'unavailable' };
+  if (window.status === 'unlimited') {
+    return { value: '不限额', detail: `已用 $${Number(window.used_usd || 0).toFixed(2)}`, status: window.status };
+  }
+  const percent = Number.isFinite(Number(window.percent)) ? `${Number(window.percent).toFixed(1)}%` : '-';
+  const detail = usageMode === 'shared_pool' && window.limit_usd > 0
+    ? `$${Number(window.used_usd || 0).toFixed(2)} / $${Number(window.limit_usd).toFixed(2)}`
+    : statusLabel(window.status);
+  return { value: percent, detail, status: window.status || 'unavailable' };
 }
 
 export default function createSub2apiUsagePanel(config) {
   const cfg = config.sub2apiUsage || {};
   const enabled = cfg.enabled === true;
   const monitorBaseUrl = cleanBaseUrl(cfg.monitorBaseUrl);
-  const customerEmail = String(cfg.customerEmail || '').trim();
+  const username = String(cfg.username || '').trim();
+  const apiToken = String(cfg.apiToken || '').trim();
   const intervalMs = cfg.intervalMs || 30000;
   const cacheTtlMs = cfg.cacheTtlMs || 30000;
   const timeoutMs = cfg.timeoutMs || 8000;
   const staleTtlMs = cfg.staleTtlMs || 300000;
   const allowLocalRefresh = cfg.allowLocalRefresh === true;
-  const allowUpstreamRefresh = cfg.allowUpstreamRefresh === true;
-  const apiToken = String(cfg.apiToken || '').trim();
 
   const state = {
     enabled,
-    configured: Boolean(monitorBaseUrl && customerEmail),
-    customerEmail,
+    configured: Boolean(monitorBaseUrl && username && apiToken),
+    username,
     lastCheck: null,
     lastSuccess: null,
     error: null,
@@ -115,17 +87,11 @@ export default function createSub2apiUsagePanel(config) {
   let timer = null;
   let inFlight = null;
 
-  function headers() {
-    const out = { Accept: 'application/json' };
-    if (apiToken) out.Authorization = `Bearer ${apiToken}`;
-    return out;
-  }
-
   function publicState() {
     return {
       enabled: state.enabled,
       configured: state.configured,
-      customerEmail: state.customerEmail,
+      username: state.username,
       lastCheck: state.lastCheck,
       lastSuccess: state.lastSuccess,
       error: state.error,
@@ -148,18 +114,18 @@ export default function createSub2apiUsagePanel(config) {
     if (inFlight) return inFlight;
 
     inFlight = (async () => {
-      const url = new URL(`${monitorBaseUrl}/api/customer-usage`);
-      url.searchParams.set('email', customerEmail);
-      if (force && allowUpstreamRefresh) url.searchParams.set('refresh', '1');
-
+      const url = new URL(`${monitorBaseUrl}/api/downstream-usage/user`);
+      url.searchParams.set('username', username);
       try {
-        const res = await fetchWithTimeout(url, { headers: headers(), timeoutMs });
+        const res = await fetchWithTimeout(url, {
+          headers: { Accept: 'application/json', Authorization: `Bearer ${apiToken}` },
+          timeoutMs,
+        });
         state.lastCheck = Date.now();
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        state.data = normalizePayload(data);
+        state.data = normalizePayload(await res.json());
         state.error = null;
-        state.stale = false;
+        state.stale = Boolean(state.data.cache.stale);
         state.lastSuccess = state.lastCheck;
       } catch (err) {
         state.lastCheck = Date.now();
@@ -171,7 +137,6 @@ export default function createSub2apiUsagePanel(config) {
       }
       return publicState();
     })();
-
     return inFlight;
   }
 
@@ -188,115 +153,55 @@ export default function createSub2apiUsagePanel(config) {
   function routes() {
     return {
       'GET /api/sub2api-usage': (req, res) => sendJson(res, publicState()),
-      'GET /api/sub2api-usage/refresh': async (req, res) => {
-        const result = await refresh({ force: true });
-        sendJson(res, result);
-      },
+      'GET /api/sub2api-usage/refresh': async (req, res) => sendJson(res, await refresh({ force: true })),
     };
   }
 
-  function renderEmpty(message, detail = '') {
+  function renderEmpty(message) {
+    return `<div class="panel sub2api-usage-panel"><div class="panel-header"><h3>GPT 用量</h3><span class="status-badge unknown">未启用</span></div><div class="sub2api-empty">${esc(message)}</div></div>`;
+  }
+
+  function renderWindow(label, window, usageMode) {
+    const shown = windowDisplay(window, usageMode);
     return `
-      <div class="panel sub2api-usage-panel">
-        <div class="panel-header">
-          <h3>上游账号用量</h3>
-          <span class="status-badge unknown">未启用</span>
-        </div>
-        <div class="sub2api-empty">${esc(message)}</div>
-        ${detail ? `<div class="card-time">${esc(detail)}</div>` : ''}
+      <div class="sub2api-summary-card ${statusClass(shown.status)}">
+        <span>${esc(label)}</span>
+        <strong>${esc(shown.value)}</strong>
+        <small>${esc(shown.detail)}</small>
+        <small>${window?.reset_at ? `重置 ${esc(window.reset_at)}` : '-'}</small>
       </div>`;
   }
 
   function renderSummary(data) {
-    const s = data.summary || {};
-    const cards = [
-      ['可用账号', `${text(s.available_accounts, 0)} / ${text(s.total_accounts, 0)}`],
-      ['今日用量', `${text(s.today_tokens)} ${text(s.today_cost, '')}`],
-      ['5H / 7D 峰值', `${text(s.five_hour_max)} / ${text(s.seven_day_max)}`],
-      ['最近到期', text(s.nearest_credential_expiry || s.nearest_subscription_expiry)],
-    ];
-
+    const sourceLabel = data.source.label || data.source.tier || '-';
+    const sourceDetail = data.usageMode === 'dedicated_upstream'
+      ? `${text(data.source.available_accounts, 0)} / ${text(data.source.total_accounts, 0)} 可用`
+      : statusLabel(data.overallStatus);
     return `
       <div class="sub2api-summary">
-        ${cards.map(([label, value]) => `
-          <div class="sub2api-summary-card">
-            <span>${esc(label)}</span>
-            <strong>${esc(value)}</strong>
-          </div>`).join('')}
-      </div>`;
-  }
-
-  function renderRows(data) {
-    const accounts = data.accounts || [];
-    if (accounts.length === 0) {
-      return '<div class="sub2api-empty">暂无关联上游账号</div>';
-    }
-
-    return `
-      <div class="sub2api-table-wrap">
-        <table class="sub2api-table">
-          <thead>
-            <tr>
-              <th>站点</th>
-              <th>账号</th>
-              <th>分组 / 平台</th>
-              <th>状态</th>
-              <th>5H</th>
-              <th>7D</th>
-              <th>订阅到期</th>
-              <th>凭证到期</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${accounts.map((account, index) => `
-              <tr data-status="${esc(statusClass(account))}" data-key="${esc(accountKey(account, index))}">
-                <td>${esc(text(account.site || account.target_id))}</td>
-                <td class="sub2api-account" title="${esc(text(account.account))}">${esc(text(account.account))}</td>
-                <td>
-                  <strong>${esc(text(account.group))}</strong>
-                  <small>${esc(text(account.platform))}</small>
-                </td>
-                <td><span class="sub2api-status ${statusClass(account)}">${esc(statusLabel(account))}</span></td>
-                <td>${usageCell('', account.usage_5h_raw, account.usage_5h, account.usage_5h_reset_at, account.usage_5h_state)}</td>
-                <td>${usageCell('', account.usage_7d_raw, account.usage_7d, account.usage_7d_reset_at, account.usage_7d_state)}</td>
-                <td>${dateCell(account.subscription_expires_at, account.subscription_expiry_state)}</td>
-                <td>${dateCell(account.credential_expires_at, account.credential_expiry_state)}</td>
-              </tr>`).join('')}
-          </tbody>
-        </table>
+        <div class="sub2api-summary-card"><span>用量来源</span><strong>${esc(modeLabel(data.usageMode))}</strong><small>${esc(sourceLabel)}</small><small>${esc(sourceDetail)}</small></div>
+        ${renderWindow('5 小时', data.windows['5h'], data.usageMode)}
+        ${renderWindow('7 天', data.windows['7d'], data.usageMode)}
       </div>`;
   }
 
   function render() {
     if (!enabled) return '';
-    if (!state.configured) {
-      return renderEmpty('请配置 sub2apiUsage.monitorBaseUrl 和 sub2apiUsage.customerEmail');
-    }
-
+    if (!state.configured) return renderEmpty('请配置中心地址、固定用户名和只读 Token');
     const data = state.data;
-    const badgeCls = state.error ? (state.stale ? 'warn' : 'fail') : 'ok';
-    const badgeText = state.error ? (state.stale ? '缓存' : '异常') : '正常';
-    const detail = state.error
-      ? `<div class="sub2api-error">${esc(state.error)}</div>`
-      : '';
+    const badgeCls = state.error ? (state.stale ? 'warn' : 'fail') : statusClass(data?.overallStatus);
+    const badgeText = state.error ? (state.stale ? '缓存' : '异常') : statusLabel(data?.overallStatus);
     const meta = [
-      state.customerEmail,
+      state.username,
       data?.updatedAt ? `中心更新 ${data.updatedAt}` : '',
       state.lastSuccess ? `本机更新 ${relative(state.lastSuccess)}` : '',
+      state.stale || data?.cache?.stale ? '数据已过期' : '',
     ].filter(Boolean).join(' · ');
-
     return `
       <div class="panel sub2api-usage-panel">
-        <div class="panel-header">
-          <h3>上游账号用量</h3>
-          <div class="sub2api-actions">
-            <span class="status-badge ${badgeCls}">${badgeText}</span>
-            <button onclick="refreshSub2apiUsage()" class="btn btn-sm">刷新</button>
-          </div>
-        </div>
+        <div class="panel-header"><h3>GPT 用量</h3><div class="sub2api-actions"><span class="status-badge ${badgeCls}">${esc(badgeText)}</span><button onclick="refreshSub2apiUsage()" class="btn btn-sm">刷新</button></div></div>
         ${data ? renderSummary(data) : '<div class="sub2api-empty">正在获取用量数据</div>'}
-        ${data ? renderRows(data) : ''}
-        ${detail}
+        ${state.error ? `<div class="sub2api-error">${esc(state.error)}</div>` : ''}
         <div class="card-time">${esc(meta || '-')}</div>
       </div>`;
   }

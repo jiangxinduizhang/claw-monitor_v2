@@ -11,7 +11,7 @@ CONFIG_FILE="${INSTALL_DIR}/data/config.json"
 OPENCLAW_CONFIG_FILE="${HOME}/.openclaw/openclaw.json"
 HUB_PULLER_URL_DEFAULT="http://100.76.197.26:8126"
 HUB_PULLER_URL="${HUB_PULLER_URL:-$HUB_PULLER_URL_DEFAULT}"
-SUB2API_USAGE_MONITOR_URL_DEFAULT="http://100.71.199.7:18191"
+SUB2API_USAGE_MONITOR_URL_DEFAULT="${SUB2API_USAGE_MONITOR_URL_DEFAULT:-https://monitor.example.com}"
 
 configure_feishu_status() {
   local mode="$1"
@@ -99,13 +99,12 @@ configure_sub2api_usage() {
   local enable_choice=""
   local currently_enabled="false"
   local monitor_url="$SUB2API_USAGE_MONITOR_URL_DEFAULT"
-  local customer_email=""
+  local username=""
   local interval_ms="30000"
   local cache_ttl_ms="30000"
   local timeout_ms="8000"
   local stale_ttl_ms="300000"
   local allow_local_refresh="false"
-  local allow_upstream_refresh="false"
   local api_token=""
 
   trim_value() {
@@ -116,8 +115,8 @@ configure_sub2api_usage() {
     [[ "$1" =~ ^https?://[^[:space:]]+$ ]]
   }
 
-  is_email_like() {
-    [[ "$1" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]
+  is_username_like() {
+    [[ -n "$1" && ! "$1" =~ [[:space:]] ]]
   }
 
   if [ -f "$CONFIG_FILE" ]; then
@@ -131,13 +130,12 @@ const enabled = cfg.sub2apiUsage && usage.enabled === true ? 'true' : 'false';
 console.log([
   `enabled=${enabled}`,
   `monitor_url=${String(usage.monitorBaseUrl || '')}`,
-  `customer_email=${String(usage.customerEmail || '')}`,
+  `username=${String(usage.username || '')}`,
   `interval_ms=${String(usage.intervalMs || 30000)}`,
   `cache_ttl_ms=${String(usage.cacheTtlMs || 30000)}`,
   `timeout_ms=${String(usage.timeoutMs || 8000)}`,
   `stale_ttl_ms=${String(usage.staleTtlMs || 300000)}`,
   `allow_local_refresh=${usage.allowLocalRefresh === true ? 'true' : 'false'}`,
-  `allow_upstream_refresh=${usage.allowUpstreamRefresh === true ? 'true' : 'false'}`,
   `api_token=${String(usage.apiToken || '')}`,
 ].join('\n'));
 NODE
@@ -149,13 +147,12 @@ NODE
         case "$key" in
           enabled) currently_enabled="${value:-false}" ;;
           monitor_url) monitor_url="$value" ;;
-          customer_email) customer_email="$value" ;;
+          username) username="$value" ;;
           interval_ms) interval_ms="${value:-30000}" ;;
           cache_ttl_ms) cache_ttl_ms="${value:-30000}" ;;
           timeout_ms) timeout_ms="${value:-8000}" ;;
           stale_ttl_ms) stale_ttl_ms="${value:-300000}" ;;
           allow_local_refresh) allow_local_refresh="${value:-false}" ;;
-          allow_upstream_refresh) allow_upstream_refresh="${value:-false}" ;;
           api_token) api_token="$value" ;;
         esac
       done <<EOF
@@ -170,8 +167,8 @@ EOF
   if ! is_http_url "$monitor_url"; then
     monitor_url="$SUB2API_USAGE_MONITOR_URL_DEFAULT"
   fi
-  if ! is_email_like "$customer_email"; then
-    customer_email=""
+  if ! is_username_like "$username"; then
+    username=""
   fi
 
   echo ""
@@ -183,11 +180,10 @@ EOF
   fi
 
   if [[ ! "$enable_choice" =~ ^[Yy]$ ]]; then
-    export CONFIG_FILE SUB2API_USAGE_MONITOR_URL="$monitor_url" SUB2API_USAGE_CUSTOMER_EMAIL="$customer_email"
+    export CONFIG_FILE SUB2API_USAGE_MONITOR_URL="$monitor_url" SUB2API_USAGE_USERNAME="$username"
     export SUB2API_USAGE_INTERVAL_MS="$interval_ms" SUB2API_USAGE_CACHE_TTL_MS="$cache_ttl_ms"
     export SUB2API_USAGE_TIMEOUT_MS="$timeout_ms" SUB2API_USAGE_STALE_TTL_MS="$stale_ttl_ms"
     export SUB2API_USAGE_ALLOW_LOCAL_REFRESH="$allow_local_refresh"
-    export SUB2API_USAGE_ALLOW_UPSTREAM_REFRESH="$allow_upstream_refresh"
     export SUB2API_USAGE_API_TOKEN="$api_token"
     "${NODE_BIN:-node}" <<'NODE'
 const fs = require('fs');
@@ -197,14 +193,13 @@ const existing = cfg.sub2apiUsage || {};
 cfg.sub2apiUsage = {
   enabled: false,
   monitorBaseUrl: process.env.SUB2API_USAGE_MONITOR_URL || existing.monitorBaseUrl || '',
-  customerEmail: process.env.SUB2API_USAGE_CUSTOMER_EMAIL || existing.customerEmail || '',
+  username: process.env.SUB2API_USAGE_USERNAME || existing.username || '',
   apiToken: process.env.SUB2API_USAGE_API_TOKEN || existing.apiToken || '',
   intervalMs: Number(process.env.SUB2API_USAGE_INTERVAL_MS || existing.intervalMs || '30000') || 30000,
   cacheTtlMs: Number(process.env.SUB2API_USAGE_CACHE_TTL_MS || existing.cacheTtlMs || '30000') || 30000,
   timeoutMs: Number(process.env.SUB2API_USAGE_TIMEOUT_MS || existing.timeoutMs || '8000') || 8000,
   staleTtlMs: Number(process.env.SUB2API_USAGE_STALE_TTL_MS || existing.staleTtlMs || '300000') || 300000,
   allowLocalRefresh: process.env.SUB2API_USAGE_ALLOW_LOCAL_REFRESH === 'true',
-  allowUpstreamRefresh: process.env.SUB2API_USAGE_ALLOW_UPSTREAM_REFRESH === 'true',
 };
 fs.writeFileSync(path, JSON.stringify(cfg, null, 2) + '\n');
 console.log('[INFO] sub2api usage monitor disabled');
@@ -223,28 +218,34 @@ NODE
     monitor_url="$SUB2API_USAGE_MONITOR_URL_DEFAULT"
   done
 
-  if [ -n "$customer_email" ]; then
-    read -rp "客户邮箱 [${customer_email}]: " customer_email_input || customer_email_input=""
-    customer_email="${customer_email_input:-$customer_email}"
-    customer_email="$(trim_value "$customer_email")"
+  if [ -n "$username" ]; then
+    read -rp "下游用户名 [${username}]: " username_input || username_input=""
+    username="${username_input:-$username}"
+    username="$(trim_value "$username")"
   fi
 
-  while ! is_email_like "$customer_email"; do
-    if ! read -rp "客户邮箱: " customer_email; then
-      echo "[ERROR] 启用 sub2api 客户用量监控需要填写有效客户邮箱。"
+  while ! is_username_like "$username"; do
+    if ! read -rp "下游用户名: " username; then
+      echo "[ERROR] 启用 sub2api 用量监控需要填写下游用户名。"
       return 1
     fi
-    customer_email="$(trim_value "$customer_email")"
-    if ! is_email_like "$customer_email"; then
-      echo "[WARN] 启用 sub2api 客户用量监控需要填写有效客户邮箱。"
+    username="$(trim_value "$username")"
+    if ! is_username_like "$username"; then
+      echo "[WARN] 下游用户名不能为空且不能包含空格。"
     fi
   done
 
-  export CONFIG_FILE SUB2API_USAGE_MONITOR_URL="$monitor_url" SUB2API_USAGE_CUSTOMER_EMAIL="$customer_email"
+  while [ -z "$api_token" ]; do
+    read -rsp "中心只读 Token: " api_token || api_token=""
+    echo ""
+    api_token="$(trim_value "$api_token")"
+    [ -z "$api_token" ] && echo "[WARN] 启用 sub2api 用量监控需要只读 Token。"
+  done
+
+  export CONFIG_FILE SUB2API_USAGE_MONITOR_URL="$monitor_url" SUB2API_USAGE_USERNAME="$username"
   export SUB2API_USAGE_INTERVAL_MS="$interval_ms" SUB2API_USAGE_CACHE_TTL_MS="$cache_ttl_ms"
   export SUB2API_USAGE_TIMEOUT_MS="$timeout_ms" SUB2API_USAGE_STALE_TTL_MS="$stale_ttl_ms"
   export SUB2API_USAGE_ALLOW_LOCAL_REFRESH="$allow_local_refresh"
-  export SUB2API_USAGE_ALLOW_UPSTREAM_REFRESH="$allow_upstream_refresh"
   export SUB2API_USAGE_API_TOKEN="$api_token"
   "${NODE_BIN:-node}" <<'NODE'
 const fs = require('fs');
@@ -254,14 +255,13 @@ const existing = cfg.sub2apiUsage || {};
 cfg.sub2apiUsage = {
   enabled: true,
   monitorBaseUrl: process.env.SUB2API_USAGE_MONITOR_URL || existing.monitorBaseUrl || '',
-  customerEmail: process.env.SUB2API_USAGE_CUSTOMER_EMAIL || existing.customerEmail || '',
+  username: process.env.SUB2API_USAGE_USERNAME || existing.username || '',
   apiToken: process.env.SUB2API_USAGE_API_TOKEN || existing.apiToken || '',
   intervalMs: Number(process.env.SUB2API_USAGE_INTERVAL_MS || existing.intervalMs || '30000') || 30000,
   cacheTtlMs: Number(process.env.SUB2API_USAGE_CACHE_TTL_MS || existing.cacheTtlMs || '30000') || 30000,
   timeoutMs: Number(process.env.SUB2API_USAGE_TIMEOUT_MS || existing.timeoutMs || '8000') || 8000,
   staleTtlMs: Number(process.env.SUB2API_USAGE_STALE_TTL_MS || existing.staleTtlMs || '300000') || 300000,
   allowLocalRefresh: process.env.SUB2API_USAGE_ALLOW_LOCAL_REFRESH === 'true',
-  allowUpstreamRefresh: process.env.SUB2API_USAGE_ALLOW_UPSTREAM_REFRESH === 'true',
 };
 fs.writeFileSync(path, JSON.stringify(cfg, null, 2) + '\n');
 console.log('[OK] sub2apiUsage config written to', path);
@@ -403,14 +403,13 @@ if [ ! -f "$CONFIG_FILE" ]; then
   "sub2apiUsage": {
     "enabled": false,
     "monitorBaseUrl": "${SUB2API_USAGE_MONITOR_URL_DEFAULT}",
-    "customerEmail": "",
+    "username": "",
     "apiToken": "",
     "intervalMs": 30000,
     "cacheTtlMs": 30000,
     "timeoutMs": 8000,
     "staleTtlMs": 300000,
-    "allowLocalRefresh": false,
-    "allowUpstreamRefresh": false
+    "allowLocalRefresh": false
   },
 
   "logs": {
